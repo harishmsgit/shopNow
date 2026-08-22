@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Search, ShoppingCart, Plus, Minus, X } from 'lucide-react';
+import { Search, ShoppingCart, Plus, Minus, X, User, Menu, Star, Download } from 'lucide-react';
 
 const ShopNowApp = () => {
   const [products, setProducts] = useState([]);
