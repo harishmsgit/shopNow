@@ -87,6 +87,7 @@ docker compose ps
 | Customer app | <http://localhost:3000> |
 | Admin app | <http://localhost:3002> |
 | Backend health | <http://localhost:5000/api/health> |
+| MongoDB from the host | `mongodb://localhost:27018/shopnow` |
 
 ### 4. Test the API
 
@@ -208,6 +209,345 @@ Browser
 ```
 
 The frontend and admin containers also use Nginx to serve the compiled React files and provide single-page-application routing. MongoDB is an internal service and is not exposed through the public load balancer.
+
+## Command reference
+
+Run these commands from the `shopNow` repository root unless a different folder is shown.
+
+### Local Docker commands
+
+```bash
+# Validate, build, and start
+docker compose config
+docker compose build
+docker compose up -d
+docker compose ps
+
+# Follow logs
+docker compose logs -f backend
+docker compose logs -f frontend
+docker compose logs -f admin
+docker compose logs -f mongo
+
+# Restart one service
+docker compose restart backend
+
+# Stop the application
+docker compose down
+```
+
+`docker compose down -v` also deletes the local MongoDB volume. Use it only when local data can be removed.
+
+### npm commands
+
+```bash
+# Backend
+npm --prefix backend ci
+npm --prefix backend start
+
+# Customer app
+npm --prefix frontend ci
+npm --prefix frontend start
+npm --prefix frontend run build
+
+# Admin app
+npm --prefix admin ci
+npm --prefix admin start
+npm --prefix admin run build
+```
+
+### Local API commands
+
+```bash
+API_BASE_URL=http://localhost:5000/api
+
+curl -fsS "$API_BASE_URL/health"
+curl -fsS "$API_BASE_URL/products?page=1&limit=20"
+curl -fsS "$API_BASE_URL/categories"
+curl -fsS "$API_BASE_URL/invoices?page=1&limit=20"
+curl -fsS "$API_BASE_URL/analytics/dashboard"
+```
+
+### Git checks before a commit
+
+```bash
+git status --short
+git diff --check
+git diff --stat
+```
+
+## Verified local execution result
+
+The project was built and run locally on 22 August 2026 with Docker Engine `29.5.2` and Docker Compose `v5.1.4`.
+
+Command executed:
+
+```bash
+docker compose up --build -d
+docker compose ps
+```
+
+Sanitized result:
+
+```text
+SERVICE    STATUS    HEALTHY    HOST ACCESS
+frontend   running   yes        http://localhost:3000
+admin      running   yes        http://localhost:3002
+backend    running   yes        http://localhost:5000
+mongo      running   yes        mongodb://localhost:27018/shopnow
+```
+
+HTTP and database verification:
+
+```text
+GET http://localhost:3000/             -> HTTP 200
+GET http://localhost:3002/             -> HTTP 200
+GET http://localhost:5000/api/health   -> HTTP 200
+
+{"status":"OK","message":"ShopNow API is running"}
+
+GET /api/products                     -> 6 products
+GET /api/categories                   -> ["electronics","fashion","home"]
+GET /api/analytics/dashboard          -> 0 orders and 0 revenue on the fresh database
+MongoDB shopnow.products count        -> 6
+```
+
+Two local compatibility fixes were verified during execution:
+
+- Host port `27018` maps to MongoDB container port `27017` because host port `27017` was already used by another local project.
+- Docker Compose gives the backend the alias `backend-service`, allowing the same Nginx upstream name to work locally and in Kubernetes.
+
+### Actual local command output
+
+Command:
+
+```bash
+docker compose ps
+```
+
+Actual output:
+
+```text
+NAME               SERVICE    STATUS                 PORTS
+shopnow-frontend   frontend   Up (healthy)           0.0.0.0:3000->80/tcp
+shopnow-admin      admin      Up (healthy)           0.0.0.0:3002->80/tcp
+shopnow-backend    backend    Up (healthy)           0.0.0.0:5000->5000/tcp
+shopnow-mongo      mongo      Up                      0.0.0.0:27018->27017/tcp
+```
+
+Command:
+
+```bash
+curl -i http://localhost:5000/api/health
+```
+
+Actual output:
+
+```http
+HTTP/1.1 200 OK
+Content-Type: application/json; charset=utf-8
+
+{"status":"OK","message":"ShopNow API is running"}
+```
+
+Command:
+
+```bash
+curl http://localhost:5000/api/categories
+```
+
+Actual output:
+
+```json
+["electronics","fashion","home"]
+```
+
+Command:
+
+```bash
+curl http://localhost:5000/api/analytics/dashboard
+```
+
+Actual output from the fresh local database:
+
+```json
+{
+  "totalOrders": 0,
+  "pendingOrders": 0,
+  "readyOrders": 0,
+  "collectedOrders": 0,
+  "totalRevenue": 0,
+  "todayOrders": 0
+}
+```
+
+Command:
+
+```bash
+docker exec shopnow-mongo \
+  mongosh --quiet --eval "db.getSiblingDB('shopnow').products.countDocuments({})"
+```
+
+Actual output:
+
+```text
+6
+```
+
+Command:
+
+```bash
+curl -o /dev/null -s -w '%{http_code}\n' http://localhost:3000/
+curl -o /dev/null -s -w '%{http_code}\n' http://localhost:3002/
+```
+
+Actual output:
+
+```text
+200
+200
+```
+
+## Access ShopNow through the AWS Load Balancer / ALB
+
+The ingress-controller Service owns the AWS load-balancer hostname. Retrieve it dynamically instead of copying an old address from a screenshot.
+
+### 1. Connect to the EKS cluster
+
+```bash
+aws sts get-caller-identity
+aws eks update-kubeconfig --region ap-south-1 --name shopnow-app-eks
+kubectl cluster-info
+```
+
+### 2. Get the load-balancer hostname
+
+```bash
+export LB_HOST=$(kubectl get service \
+  -n ingress-nginx ingress-nginx-controller \
+  -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+
+echo "$LB_HOST"
+```
+
+PowerShell:
+
+```powershell
+$LB_HOST = kubectl get service `
+  -n ingress-nginx ingress-nginx-controller `
+  -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'
+
+$LB_HOST
+```
+
+If the output is empty, run `kubectl get service -n ingress-nginx ingress-nginx-controller -w` and wait for AWS to assign an address.
+
+### 3. Open each application route
+
+The deployed base path is `shopnow`:
+
+| Page | Address |
+|---|---|
+| Customer application | `http://<LB_HOST>/shopnow/` |
+| Admin application | `http://<LB_HOST>/shopnow/admin/` |
+| API health check | `http://<LB_HOST>/shopnow/api/health` |
+
+Bash verification:
+
+```bash
+curl -I --max-time 15 "http://$LB_HOST/shopnow/"
+curl -I --max-time 15 "http://$LB_HOST/shopnow/admin/"
+curl -fsS --max-time 15 "http://$LB_HOST/shopnow/api/health"
+curl -fsS --max-time 15 "http://$LB_HOST/shopnow/api/products"
+```
+
+PowerShell browser access:
+
+```powershell
+Start-Process "http://$LB_HOST/shopnow/"
+Start-Process "http://$LB_HOST/shopnow/admin/"
+Invoke-RestMethod "http://$LB_HOST/shopnow/api/health"
+```
+
+### 4. Check routing when a URL does not work
+
+```bash
+kubectl get ingress -n shopnow-ns -o wide
+kubectl describe ingress -n shopnow-ns
+kubectl get service,endpoints -n shopnow-ns
+kubectl get pods -n shopnow-ns -o wide
+kubectl logs -n ingress-nginx deployment/ingress-nginx-controller --tail=200
+kubectl logs -n shopnow-ns deployment/backend --tail=200
+```
+
+The current manifests use the Nginx Ingress Controller. AWS may provision a Classic Load Balancer or Network Load Balancer for that Service depending on its annotations and cluster configuration. An AWS Application Load Balancer specifically requires the AWS Load Balancer Controller and an ALB-backed Ingress.
+
+### Verified AWS access result - 22 August 2026
+
+```text
+Customer route /shopnow/             -> HTTP 200
+Admin route /shopnow/admin/          -> HTTP 200
+API route /shopnow/api/health        -> HTTP 200
+API response                         -> {"status":"OK","message":"ShopNow API is running"}
+```
+
+The hostname is intentionally not fixed in this README. Retrieve the current value with the command above because AWS load-balancer addresses can change.
+
+Commands:
+
+```bash
+curl -o /dev/null -s -w '%{http_code}\n' "http://$LB_HOST/shopnow/"
+curl -o /dev/null -s -w '%{http_code}\n' "http://$LB_HOST/shopnow/admin/"
+curl -i "http://$LB_HOST/shopnow/api/health"
+```
+
+Actual output:
+
+```text
+200
+200
+
+HTTP/1.1 200 OK
+{"status":"OK","message":"ShopNow API is running"}
+```
+
+## Who accesses each ShopNow application
+
+| User | Route | What the user can do |
+|---|---|---|
+| Customer | `http://<LB_HOST>/shopnow/` | Browse products, use the cart, checkout, and receive a collection token |
+| Administrator | `http://<LB_HOST>/shopnow/admin/` | Search orders, update status, confirm collection, and view dashboard totals |
+| API user/tester | `http://<LB_HOST>/shopnow/api/...` | Call health, products, invoices, categories, users, and analytics endpoints |
+| Platform operator | AWS, Jenkins, and kubectl access | Deploy and troubleshoot the application; does not use the customer UI for operations |
+
+### Customer access
+
+```bash
+curl -I "http://$LB_HOST/shopnow/"
+```
+
+The load balancer forwards the request to Nginx Ingress, which sends it to `frontend-service:80`. Nginx inside the frontend container serves the compiled React customer application.
+
+### Administrator access
+
+```bash
+curl -I "http://$LB_HOST/shopnow/admin/"
+```
+
+Nginx Ingress sends this route to `admin-service:80`, where the admin container serves the React admin application.
+
+### API access
+
+```bash
+curl -fsS "http://$LB_HOST/shopnow/api/health"
+curl -fsS "http://$LB_HOST/shopnow/api/products"
+curl -fsS "http://$LB_HOST/shopnow/api/categories"
+curl -fsS "http://$LB_HOST/shopnow/api/analytics/dashboard"
+```
+
+API traffic goes directly from Nginx Ingress to `backend-service:5000`. The Express backend communicates with MongoDB through the private `mongo:27017` Service.
+
+> Current capstone behavior: customer and admin are separate interfaces and paths, but this repository does not show production-grade admin authentication or role-based authorization. Do not expose administrative or mutating API routes publicly in production until authentication and authorization are implemented.
 
 ## Screenshots
 
